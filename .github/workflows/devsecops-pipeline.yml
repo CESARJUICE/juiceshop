@@ -1,0 +1,130 @@
+name: DevSecOps Pipeline - SecureTasks Juice Shop
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ========================
+  # 1. Build & Test
+  # ========================
+  build:
+    name: 🏗 Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build Docker image
+        run: docker build -t securetasks/juice-shop:latest .
+
+  # ========================
+  # 2. SAST - Semgrep
+  # ========================
+  sast:
+    name: 🔍 SAST - Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: "p/owasp-top-ten"
+
+  # ========================
+  # 3. Dependency Scan - npm audit
+  # ========================
+  dependencies:
+    name: 📦 Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run npm audit
+        run: |
+          npm audit --audit-level=high
+          
+  # ========================
+  # 4. Container Scan - Trivy
+  # ========================
+  container-scan:
+    name: 🐳 Container Scan - Trivy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t securetasks/juice-shop:latest .
+
+      - name: Scan with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: securetasks/juice-shop:latest
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          format: 'table'
+
+  # ========================
+  # 5. DAST - OWASP ZAP
+  # ========================
+  dast:
+    name: 🌐 DAST - OWASP ZAP Baseline
+    runs-on: ubuntu-latest
+    services:
+      juice-shop:
+        image: securetasks/juice-shop:latest
+        ports:
+          - 3000:3000
+        options: >-
+          --health-cmd "curl --fail http://localhost:3000 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.7.0
+        with:
+          target: 'http://juice-shop:3000'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+
+  # ========================
+  # 6. Deploy em Staging (opcional)
+  # ========================
+  deploy-staging:
+    name: 🚀 Deploy to Staging (VPS)
+    runs-on: ubuntu-latest
+    needs: [build, sast, dependencies, container-scan, dast]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            docker pull securetasks/juice-shop:latest
+            docker stop juice-shop || true
+            docker rm juice-shop || true
+            docker run -d --name juice-shop -p 80:3000 securetasks/juice-shop:latest
