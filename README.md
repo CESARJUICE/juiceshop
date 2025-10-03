@@ -16,6 +16,14 @@ Este repositório contém a implementação prática de um **pipeline CI/CD segu
 
 ---
 
+## 🛡️ **Infraestrutura – Infra da Solução**
+- A infra utilizada:
+- Servidor VPS Cloud
+- S.O Unbuntu 22.04 lts
+- Github
+
+---
+
 ## 🧭 **Arquitetura da Solução**
 
 ```text

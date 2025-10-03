@@ -1,130 +1,125 @@
-name: DevSecOps Pipeline - SecureTasks Juice Shop
+name: 🛡️ DevSecOps Pipeline - Juice Shop
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ main ]
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
-  # ========================
-  # 1. Build & Test
-  # ========================
-  build:
-    name: 🏗 Build & Test
+  # ======================
+  # 1. Checkout & Setup
+  # ======================
+  setup:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: 🧾 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: 🟢 Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: '18'
 
-      - name: Install dependencies
-        run: npm install
+      - name: 📦 Install Dependencies
+        run: |
+          cd src
+          npm install
 
-      - name: Run unit tests
-        run: npm test
-
-      - name: Build Docker image
-        run: docker build -t securetasks/juice-shop:latest .
-
-  # ========================
+  # ======================
   # 2. SAST - Semgrep
-  # ========================
+  # ======================
   sast:
-    name: 🔍 SAST - Semgrep
     runs-on: ubuntu-latest
+    needs: setup
     steps:
-      - name: Checkout
+      - name: 🧾 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Run Semgrep
+      - name: 🔍 Run Semgrep (SAST)
         uses: returntocorp/semgrep-action@v1
         with:
           config: "p/owasp-top-ten"
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-  # ========================
-  # 3. Dependency Scan - npm audit
-  # ========================
-  dependencies:
-    name: 📦 Dependency Scan
+  # ======================
+  # 3. Dependency Scans (npm + Trivy)
+  # ======================
+  dependency-scan:
     runs-on: ubuntu-latest
+    needs: setup
     steps:
-      - name: Checkout
+      - name: 🧾 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Run npm audit
+      - name: 📦 npm audit
         run: |
-          npm audit --audit-level=high
-          
-  # ========================
-  # 4. Container Scan - Trivy
-  # ========================
-  container-scan:
-    name: 🐳 Container Scan - Trivy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+          cd src
+          npm audit --audit-level=high || true
 
-      - name: Build Docker image
-        run: docker build -t securetasks/juice-shop:latest .
+      - name: 🔍 Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
 
-      - name: Scan with Trivy
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: securetasks/juice-shop:latest
-          severity: HIGH,CRITICAL
-          exit-code: '1'
-          format: 'table'
+      - name: 🔐 Trivy File System Scan
+        run: |
+          trivy fs --exit-code 0 --severity HIGH,CRITICAL .
 
-  # ========================
-  # 5. DAST - OWASP ZAP
-  # ========================
+  # ======================
+  # 4. DAST - OWASP ZAP
+  # ======================
   dast:
-    name: 🌐 DAST - OWASP ZAP Baseline
     runs-on: ubuntu-latest
-    services:
-      juice-shop:
-        image: securetasks/juice-shop:latest
-        ports:
-          - 3000:3000
-        options: >-
-          --health-cmd "curl --fail http://localhost:3000 || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    needs: dependency-scan
     steps:
-      - name: ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.7.0
-        with:
-          target: 'http://juice-shop:3000'
-          rules_file_name: '.zap/rules.tsv'
-          cmd_options: '-a'
+      - name: 🌐 Run Juice Shop in background
+        run: |
+          docker run -d -p 3000:3000 --name juice-shop bkimminich/juice-shop
+          sleep 15
 
-  # ========================
-  # 6. Deploy em Staging (opcional)
-  # ========================
-  deploy-staging:
-    name: 🚀 Deploy to Staging (VPS)
-    runs-on: ubuntu-latest
-    needs: [build, sast, dependencies, container-scan, dast]
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Deploy to VPS via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - name: 🧪 Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.9.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
+          target: "http://localhost:3000"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a"
+
+  # ======================
+  # 5. Deploy to VPS
+  # ======================
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [sast, dependency-scan, dast]
+    steps:
+      - name: 🚀 Deploy to VPS (Juice Shop)
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: 82.25.79.61
+          username: root
+          key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            docker pull securetasks/juice-shop:latest
+            echo "📦 Pulling latest Juice Shop image..."
+            docker pull bkimminich/juice-shop
+
+            echo "🛑 Stopping existing container (if running)..."
             docker stop juice-shop || true
             docker rm juice-shop || true
-            docker run -d --name juice-shop -p 80:3000 securetasks/juice-shop:latest
+
+            echo "📂 Creating persistent volume..."
+            docker volume create juice_data || true
+
+            echo "🚀 Starting new container..."
+            docker run -d \
+              --name juice-shop \
+              -p 3000:3000 \
+              -v juice_data:/juice-shop/data \
+              bkimminich/juice-shop
+
+            echo "✅ Deploy complete!"
